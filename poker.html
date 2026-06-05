@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Texas Hold'em - V5.0 Fixed</title>
+    <title>Texas Hold'em - V5.4 Dual-Engine AI</title>
     <style>
         :root {
             --bg-deep: #050b14;
@@ -133,7 +133,7 @@
         .player-cards { display: flex; gap: 5px; z-index: 1; }
 
         .p-name { font-weight: 700; color: var(--text-main); font-size: 13px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
-        .p-chips { font-family: monospace; color: var(--neon-cyan); font-size: 15px; font-weight: bold; }
+        .p-chips { font-family: monospace; color: var(--neon-cyan); font-size: 15px; font-weight: bold; transition: color 0.3s; }
         .p-bet { font-family: monospace; color: var(--text-muted); font-size: 11px; margin-top: 4px; }
         .p-hand { font-family: monospace; color: var(--neon-gold); font-size: 9px; margin-top: 2px; }
 
@@ -212,7 +212,7 @@
 
     <div id="setup-screen">
         <div class="panel glass-panel">
-            <h1>HOLD'EM <span>V5.0</span></h1>
+            <h1>HOLD'EM <span>V5.4 DUAL AI</span></h1>
             <div class="form-group">
                 <label>Hệ sinh thái Bot (2 - 6):</label>
                 <input type="number" id="opponentsCount" min="2" max="6" value="6">
@@ -293,7 +293,6 @@
     let pot = 0, currentBet = 0, turnIndex = 0, gameTimer, timeLeft, stage = 0;
     let activePlayers = 0, playersActed = 0;
     let dealerIndex = -1, sbIndex = -1, bbIndex = -1;
-    let lastRaiserIndex = -1; // Track người raise cuối cùng
 
     function startGame() {
         const oppCount = parseInt(document.getElementById('opponentsCount').value);
@@ -336,64 +335,66 @@
     }
 
     function startNewHand() {
-        // ✅ FIX: Loại bỏ players với 0 chips thay vì tự in tiền
-        let activePlayers = players.filter(p => p.chips > 0);
-        if(activePlayers.length <= 1) {
-            endGame();
-            return;
-        }
-
         createDeck();
         communityCards = []; pot = 0; stage = 0; 
-        activePlayers = players.filter(p => p.chips > 0).length;
         playersActed = 0;
-        lastRaiserIndex = -1;
 
         dealerIndex = (dealerIndex + 1) % players.length;
         sbIndex = (dealerIndex + 1) % players.length;
         bbIndex = (dealerIndex + 2) % players.length;
 
+        // Bơm vốn tự động
         players.forEach(p => {
+            if (p.chips <= 0) {
+                p.chips = STARTING_CHIPS;
+                logMsg(`[SYSTEM] Bơm lại thanh khoản $${STARTING_CHIPS} cho ${p.name}`);
+            }
             p.cards = [deck.pop(), deck.pop()];
             p.bet = 0; p.folded = false;
         });
 
+        activePlayers = players.length; 
+
         let sbPlayer = players[sbIndex];
         let bbPlayer = players[bbIndex];
         
-        sbPlayer.chips -= 10; sbPlayer.bet = 10;
-        bbPlayer.chips -= 20; bbPlayer.bet = 20;
-        pot = 30; currentBet = 20;
+        let actualSB = Math.min(10, sbPlayer.chips);
+        let actualBB = Math.min(20, bbPlayer.chips);
+
+        sbPlayer.chips -= actualSB; sbPlayer.bet = actualSB;
+        bbPlayer.chips -= actualBB; bbPlayer.bet = actualBB;
+        pot = actualSB + actualBB; currentBet = actualBB;
 
         logMsg("<span class='highlight'>--- NEW HAND ---</span>");
-        logMsg(`Dealer: ${players[dealerIndex].name}`);
         
         updateUI(); 
         calculateWinProbability();
+        
         turnIndex = bbIndex; 
         nextTurn(); 
     }
 
     function nextTurn() { 
-        turnIndex = (turnIndex + 1) % players.length; 
+        do {
+            turnIndex = (turnIndex + 1) % players.length; 
+        } while (players[turnIndex].folded || (players[turnIndex].chips === 0 && players[turnIndex].bet === 0)); 
+        
         processTurn(); 
     }
 
     function processTurn() {
         if(checkHandEnd()) return;
 
-        // ✅ FIX: Cải tiến logic kiểm tra round kết thúc
-        let activePlayers = players.filter(p => !p.folded && p.chips > 0);
+        let activePlayersArr = players.filter(p => !p.folded && p.chips > 0);
         
-        if(activePlayers.length === 0) {
+        if(activePlayersArr.length === 0) {
             nextStage();
             return;
         }
 
-        // Check nếu tất cả players đã act và matched bets
-        let allMatched = activePlayers.every(p => p.bet === currentBet || p.chips === 0);
+        let allMatched = activePlayersArr.every(p => p.bet === currentBet || p.chips === 0);
         
-        if(allMatched && playersActed >= activePlayers.length) {
+        if(allMatched && playersActed >= activePlayersArr.length) {
             nextStage();
             return;
         }
@@ -412,21 +413,45 @@
             document.getElementById('btn-check').innerText = callAmt > 0 ? `Call ($${callAmt})` : `Check`;
             
             let raiseInput = document.getElementById('raise-input');
-            let minRaise = Math.max(callAmt, 20);
+            let minRaise = Math.max(callAmt + 20, 20);
             raiseInput.min = minRaise; 
             raiseInput.max = p.chips; 
             raiseInput.value = minRaise;
         } else {
             enableControls(false);
-            setTimeout(() => aiLogic(p), 2500); 
+            setTimeout(() => aiLogic(p), 2000); 
+        }
+    }
+
+    function reconcileLedger() {
+        let playersInRound = players.filter(p => !p.folded);
+        if(playersInRound.length === 0) return;
+
+        let activeBets = playersInRound.map(p => p.bet);
+        let maxBet = Math.max(...activeBets);
+        let playersWithMaxBet = playersInRound.filter(p => p.bet === maxBet);
+        
+        if(playersWithMaxBet.length === 1 && maxBet > 0) {
+            let otherBets = activeBets.filter(b => b < maxBet);
+            let secondMax = otherBets.length > 0 ? Math.max(...otherBets) : 0;
+            let overage = maxBet - secondMax;
+            
+            if(overage > 0) {
+                let hero = playersWithMaxBet[0];
+                hero.chips += overage;
+                hero.bet -= overage;
+                pot -= overage;
+                logMsg(`[LEDGER] Hoàn trả $${overage} uncalled bet cho ${hero.name}.`);
+            }
         }
     }
 
     function nextStage() {
+        reconcileLedger();
+
         players.forEach(p => p.bet = 0);
         currentBet = 0; 
         playersActed = 0; 
-        lastRaiserIndex = -1;
         stage++;
         
         if(stage === 1) communityCards.push(deck.pop(), deck.pop(), deck.pop());
@@ -449,10 +474,10 @@
 
         if(action === 'raise') {
             let inputVal = parseInt(document.getElementById('raise-input').value);
-            let minRaise = Math.max(callAmt, 20);
+            let minRaise = Math.max(callAmt + 20, 20);
             
-            if(isNaN(inputVal) || inputVal < minRaise) {
-                alert(`Raise phải >= $${minRaise}`); 
+            if(isNaN(inputVal) || (inputVal < minRaise && inputVal < p.chips)) {
+                alert(`Raise tối thiểu phải là $${Math.min(minRaise, p.chips)}`); 
                 return;
             }
             if(inputVal > p.chips) inputVal = p.chips;
@@ -464,39 +489,95 @@
         nextTurn();
     }
 
-    // ✅ UPGRADE: AI Logic cải tiến
+    // --- MODULE ĐỊNH GIÁ BÀI TẨY (PRE-FLOP) ---
+    function evaluatePreFlop(cards) {
+        if(cards.length < 2) return 0;
+        let r1 = cards[0].rank;
+        let r2 = cards[1].rank;
+        let high = Math.max(r1, r2);
+        let low = Math.min(r1, r2);
+        
+        let isSuited = cards[0].suit === cards[1].suit;
+        let isPair = r1 === r2;
+        let gap = high - low;
+
+        let score = 0;
+        if (isPair) {
+            score = high * 1000; 
+        } else {
+            score = (high * 10) + low; 
+            if (isSuited) score += 30; 
+            if (gap === 1) score += 20; 
+            else if (gap === 2) score += 10; 
+        }
+        return score;
+    }
+
+    // --- MODULE ĐIỀU PHỐI AI (BIFURCATED LOGIC) ---
     function aiLogic(bot) {
         let callAmt = currentBet - bot.bet;
-        let botHand = evaluateHand([...bot.cards, ...communityCards]);
-        
         let action = 'check';
         let actValue = 0;
-        
-        if(callAmt === 0) {
-            // Can check or raise
-            if(botHand > 5000) { // Strong hand (straight+)
-                action = 'raise';
-                actValue = Math.min(Math.floor(pot * 0.5), bot.chips);
-            } else if(botHand > 3000 && Math.random() < 0.25) {
-                action = 'raise';
-                actValue = Math.min(Math.floor(pot * 0.3), bot.chips);
+
+        let isBluffing = Math.random() < 0.15; 
+        let isSticky = Math.random() < 0.25;
+
+        // PHÂN NHÁNH 1: PRE-FLOP (Chỉ dựa vào 2 lá bài tẩy)
+        if (stage === 0) {
+            let preScore = evaluatePreFlop(bot.cards);
+            let callPercentage = (callAmt / bot.chips) * 100;
+
+            if (callAmt === 0) { 
+                if (preScore > 130 || isBluffing) { 
+                    action = 'raise';
+                    actValue = Math.min(Math.floor(pot * 0.5), bot.chips);
+                    if (actValue < 20) actValue = 20;
+                }
+            } else {
+                if (preScore > 1000 || preScore >= 140) { 
+                    action = 'call';
+                    if (Math.random() < 0.4 && bot.chips > callAmt + 40) { 
+                        action = 'raise';
+                        actValue = callAmt + Math.min(Math.floor(pot * 0.7), bot.chips);
+                    }
+                } else if (preScore >= 100 && (callPercentage < 15 || isSticky)) { 
+                    action = 'call';
+                } else {
+                    if (callAmt <= 20 && Math.random() < 0.7) action = 'call'; 
+                    else action = 'fold';
+                }
             }
-        } else {
-            // Must call, raise, or fold
+        } 
+        // PHÂN NHÁNH 2: POST-FLOP (Dựa vào 5+ lá)
+        else {
+            let botHand = evaluateHand([...bot.cards, ...communityCards]);
             let callPercentage = (callAmt / bot.chips) * 100;
             
-            if(botHand > 4000) { // Very strong
-                action = 'call';
-                if(Math.random() < 0.3 && bot.chips > callAmt + 50) {
+            if (callAmt === 0) {
+                if (botHand > 50000000000 || isBluffing) { 
                     action = 'raise';
-                    actValue = Math.min(callAmt + 100, bot.chips);
+                    let potFactor = isBluffing ? 0.3 : (0.4 + Math.random() * 0.4);
+                    actValue = Math.min(Math.floor(pot * potFactor), bot.chips);
+                    if (actValue < 20) actValue = 20;
                 }
-            } else if(botHand > 2000 && callPercentage < 25) {
-                action = 'call';
-            } else if(botHand > 1000 && callPercentage < 10) {
-                action = 'call';
             } else {
-                action = 'fold';
+                if (botHand > 40000000000) { 
+                    action = 'call';
+                    if (Math.random() < 0.4 && bot.chips > callAmt + 40) {
+                        action = 'raise'; 
+                        actValue = callAmt + Math.min(Math.floor(pot * 0.5), bot.chips);
+                    }
+                } else if (botHand > 20000000000 && (callPercentage < 40 || isSticky)) {
+                    action = 'call';
+                } else if (botHand > 10000000000 && (callPercentage < 15 || (isBluffing && callPercentage < 30))) {
+                    action = 'call';
+                    if (isBluffing && bot.chips > callAmt + 40 && Math.random() < 0.2) {
+                        action = 'raise';
+                        actValue = callAmt + 40 + Math.floor(Math.random() * 60);
+                    }
+                } else {
+                    action = 'fold'; 
+                }
             }
         }
 
@@ -522,16 +603,17 @@
             currentBet = p.bet; 
             pot += actualRaise; 
             playersActed = 1; 
-            lastRaiserIndex = p.id;
             logMsg(`${p.name} <span class="highlight">raises to $${currentBet}</span>.`);
         }
     }
 
     function checkHandEnd() {
-        let activePlayers = players.filter(p => !p.folded);
+        let notFolded = players.filter(p => !p.folded);
         
-        if(activePlayers.length === 1) {
-            let winner = activePlayers[0];
+        if(notFolded.length === 1) {
+            reconcileLedger();
+
+            let winner = notFolded[0];
             winner.chips += pot;
             triggerWinOverlay(winner.name, "OPPONENTS FOLDED", pot);
             setTimeout(() => { closeWinOverlay(); startNewHand(); }, 4000);
@@ -573,27 +655,27 @@
         }, 3500); 
     }
 
-    // ✅ FIX: Hand Evaluation cải tiến với Tiebreaker System
     function evaluateHandDetail(cards) {
         if(cards.length < 5) return {score: 0, name: "HIGH CARD"};
-        
+
         let ranks = cards.map(c => c.rank).sort((a, b) => b - a);
         let counts = {};
-        ranks.forEach(r => counts[r] = (counts[r] || 0) + 1);
-        
-        // Flush detection
         let suitsCount = {};
         let isFlush = false;
+        let flushSuit = null;
+
         cards.forEach(c => {
+            counts[c.rank] = (counts[c.rank] || 0) + 1;
             suitsCount[c.suit] = (suitsCount[c.suit] || 0) + 1;
-            if(suitsCount[c.suit] >= 5) isFlush = true;
+            if(suitsCount[c.suit] >= 5) {
+                isFlush = true;
+                flushSuit = c.suit;
+            }
         });
 
-        // Straight detection
         let uniqueRanks = [...new Set(ranks)];
-        let isStraight = false;
         let straightHigh = 0;
-        
+        let isStraight = false;
         for(let i = 0; i <= uniqueRanks.length - 5; i++) {
             if(uniqueRanks[i] - uniqueRanks[i+4] === 4) {
                 isStraight = true;
@@ -601,78 +683,67 @@
                 break;
             }
         }
-        
-        // Wheel (A-2-3-4-5)
-        if(!isStraight && uniqueRanks.includes(14) && uniqueRanks.includes(5) && 
-           uniqueRanks.includes(4) && uniqueRanks.includes(3) && uniqueRanks.includes(2)) {
+        if(!isStraight && uniqueRanks.includes(14) && uniqueRanks.includes(5) && uniqueRanks.includes(4) && uniqueRanks.includes(3) && uniqueRanks.includes(2)) {
             isStraight = true;
             straightHigh = 5;
         }
 
-        // Count hand types sorted
+        let isStraightFlush = false;
+        let sfHigh = 0;
+        if (isFlush) {
+            let flushCards = cards.filter(c => c.suit === flushSuit).map(c => c.rank).sort((a,b)=>b-a);
+            let uFlushRanks = [...new Set(flushCards)];
+            for(let i = 0; i <= uFlushRanks.length - 5; i++) {
+                if(uFlushRanks[i] - uFlushRanks[i+4] === 4) {
+                    isStraightFlush = true;
+                    sfHigh = uFlushRanks[i];
+                    break;
+                }
+            }
+            if(!isStraightFlush && uFlushRanks.includes(14) && uFlushRanks.includes(5) && uFlushRanks.includes(4) && uFlushRanks.includes(3) && uFlushRanks.includes(2)) {
+                isStraightFlush = true;
+                sfHigh = 5;
+            }
+        }
+
         let rankEntries = Object.entries(counts)
             .map(([r, c]) => [parseInt(r), c])
-            .sort((a, b) => a[1] !== b[1] ? b[1] - a[1] : b[0] - a[0]);
-        
-        let counts_sorted = rankEntries.map(r => r[1]);
-        let ranks_sorted = rankEntries.map(r => r[0]);
+            .sort((a, b) => a[1] !== b[1] ? b[1] - a[1] : b[0] - a[0]); 
 
-        // Helper: Generate score with kickers
-        const scoreWith = (base, ...kickers) => {
-            let score = base;
-            let multiplier = 1000000;
+        const getKickers = (excludeRanks, count) => ranks.filter(r => !excludeRanks.includes(r)).slice(0, count);
+
+        const scoreWith = (tier, ...kickers) => {
+            let score = tier * 10000000000;
+            let multiplier = 100000000;
             kickers.forEach(k => {
                 score += k * multiplier;
-                multiplier /= 1000;
+                multiplier /= 100;
             });
-            return Math.floor(score);
+            return score;
         };
 
-        // ✅ Evaluate hands with proper tiebreakers
-        if(isFlush && isStraight && straightHigh === 14) {
-            return {score: scoreWith(10000, 14), name: "ROYAL FLUSH"};
+        if (isStraightFlush && sfHigh === 14) return {score: scoreWith(10), name: "ROYAL FLUSH"};
+        if (isStraightFlush) return {score: scoreWith(9, sfHigh), name: "STRAIGHT FLUSH"};
+        if (rankEntries[0][1] === 4) return {score: scoreWith(8, rankEntries[0][0], ...getKickers([rankEntries[0][0]], 1)), name: "FOUR OF A KIND"};
+        if (rankEntries[0][1] === 3 && rankEntries[1][1] >= 2) return {score: scoreWith(7, rankEntries[0][0], rankEntries[1][0]), name: "FULL HOUSE"};
+        if (isFlush) {
+            let flushRanks = cards.filter(c => c.suit === flushSuit).map(c => c.rank).sort((a,b)=>b-a).slice(0,5);
+            return {score: scoreWith(6, ...flushRanks), name: "FLUSH"};
+        }
+        if (isStraight) return {score: scoreWith(5, straightHigh), name: "STRAIGHT"};
+        if (rankEntries[0][1] === 3) return {score: scoreWith(4, rankEntries[0][0], ...getKickers([rankEntries[0][0]], 2)), name: "THREE OF A KIND"};
+        
+        if (rankEntries[0][1] === 2 && rankEntries[1][1] === 2) {
+            let p1 = Math.max(rankEntries[0][0], rankEntries[1][0]); 
+            let p2 = Math.min(rankEntries[0][0], rankEntries[1][0]);
+            let kicker = getKickers([p1, p2], 1)[0];
+            return {score: scoreWith(3, p1, p2, kicker), name: "TWO PAIR"};
+        }
+        if (rankEntries[0][1] === 2) {
+            return {score: scoreWith(2, rankEntries[0][0], ...getKickers([rankEntries[0][0]], 3)), name: "PAIR"};
         }
         
-        if(isFlush && isStraight) {
-            return {score: scoreWith(9000, straightHigh), name: "STRAIGHT FLUSH"};
-        }
-        
-        if(counts_sorted[0] === 4) {
-            return {score: scoreWith(8000, ranks_sorted[0], ranks_sorted[1]), name: "FOUR OF A KIND"};
-        }
-        
-        if(counts_sorted[0] === 3 && counts_sorted[1] === 2) {
-            return {score: scoreWith(7000, ranks_sorted[0], ranks_sorted[1]), name: "FULL HOUSE"};
-        }
-        
-        if(isFlush) {
-            return {score: scoreWith(6000, ...ranks.slice(0, 5)), name: "FLUSH"};
-        }
-        
-        if(isStraight) {
-            return {score: scoreWith(5000, straightHigh), name: "STRAIGHT"};
-        }
-        
-        if(counts_sorted[0] === 3) {
-            let kickers = ranks_sorted.slice(1, 3);
-            return {score: scoreWith(4000, ranks_sorted[0], ...kickers), name: "THREE OF A KIND"};
-        }
-        
-        if(counts_sorted[0] === 2 && counts_sorted[1] === 2) {
-            // ✅ FIX: TWO PAIR - so sánh cả 2 pair + kicker
-            let pair1 = Math.max(ranks_sorted[0], ranks_sorted[1]);
-            let pair2 = Math.min(ranks_sorted[0], ranks_sorted[1]);
-            let kicker = ranks_sorted[2];
-            return {score: scoreWith(3000, pair1, pair2, kicker), name: "TWO PAIR"};
-        }
-        
-        if(counts_sorted[0] === 2) {
-            // ✅ Pair with 3 kickers
-            let kickers = ranks_sorted.slice(1, 4);
-            return {score: scoreWith(2000, ranks_sorted[0], ...kickers), name: "PAIR"};
-        }
-        
-        return {score: scoreWith(1000, ...ranks.slice(0, 5)), name: "HIGH CARD"};
+        return {score: scoreWith(1, ...ranks.slice(0, 5)), name: "HIGH CARD"};
     }
 
     function evaluateHand(cards) { 
@@ -759,7 +830,7 @@
             else if(p.id === bbIndex) roleBadge = `<div class="role-badge bb">BB</div>`;
 
             let handInfo = "";
-            if(showAllCards && !p.folded) {
+            if(showAllCards && !p.folded && p.cards.length > 0) {
                 let evalResult = evaluateHandDetail([...p.cards, ...communityCards]);
                 handInfo = `<div class="p-hand">${evalResult.name}</div>`;
             }
@@ -767,14 +838,14 @@
             el.innerHTML = `
                 ${roleBadge}
                 <div class="p-name">${p.name}</div>
-                <div class="p-chips">$${p.chips}</div>
+                <div class="p-chips" style="color: ${p.chips === 0 ? 'var(--neon-red)' : 'var(--neon-cyan)'}">$${p.chips}</div>
                 <div class="p-bet">BET: $${p.bet}</div>
                 ${handInfo}
                 <div class="thinking-bar-container"><div class="thinking-bar"></div></div>
             `;
 
             let cardCont = document.getElementById(`pcards-${p.id}`);
-            if(p.folded) cardCont.innerHTML = "";
+            if(p.folded || p.cards.length === 0) cardCont.innerHTML = "";
             else if(p.isHuman || showAllCards) cardCont.innerHTML = createCardHTML(p.cards[0]) + createCardHTML(p.cards[1]);
             else cardCont.innerHTML = `<div class="card hidden" style="width:40px;height:60px;"></div><div class="card hidden" style="width:40px;height:60px;"></div>`;
         });
